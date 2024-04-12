@@ -1,0 +1,13 @@
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from age_groups;" > .\football_tables_exports\age_groups.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from carers;" > .\football_tables_exports\carers.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from coaches;" > .\football_tables_exports\coaches.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from coaches_teams;" > .\football_tables_exports\coaches_teams.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from payments;" > .\football_tables_exports\payments.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from player_suspensions;" > .\football_tables_exports\player_suspensions.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from players;" > .\football_tables_exports\players.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from players_carers;" > .\football_tables_exports\players_carers.csv
+.\sqlite3.exe -header -csv .\football_youssef.db "select * from teams;" > .\football_tables_exports\teams.csv
+
+
+
+
