@@ -1,0 +1,169 @@
+USE DATABASE FOOTBALL;
+
+CREATE OR REPLACE FILE FORMAT my_csv_format
+  TYPE = 'CSV'
+  FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+  SKIP_HEADER = 1  -- Skip the first row (header)
+  NULL_IF = ('NULL', 'null')  -- Treat 'NULL' and 'null' as NULL values
+  REPLACE_INVALID_CHARACTERS =TRUE
+  ENCODING = 'UTF-16'
+  FIELD_DELIMITER = ',';  -- Specify the field delimiter (comma)
+
+  
+-- teams
+CREATE OR REPLACE TEMPORARY TABLE temp_teams (
+    id INT,
+    age_group_id INT,
+    league TEXT,
+    home_ground TEXT
+);
+
+COPY INTO temp_teams
+FROM @my_stage/teams.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+-- player_suspensions
+CREATE OR REPLACE TEMPORARY TABLE temp_player_suspensions (
+    id INT,
+    player_id INT,
+    start_date DATE,
+    games_suspened INT
+);
+
+COPY INTO temp_player_suspensions
+FROM @my_stage/player_suspensions.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+
+
+-- players
+CREATE OR REPLACE TEMPORARY TABLE temp_players (
+    id INT,
+    name TEXT,
+    date_of_birth DATE,
+    team_id INT
+);
+
+COPY INTO temp_players
+FROM @my_stage/players.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+-- age_groups
+CREATE OR REPLACE TEMPORARY TABLE temp_age_groups (
+    id INT,
+    max_age INT,
+    number_a_side INT
+);
+
+COPY INTO temp_age_groups
+FROM @my_stage/age_groups.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+ 
+
+-- dim_teams
+CREATE OR REPLACE TABLE dim_teams (
+    id INT PRIMARY KEY,
+    number_a_side INT,
+    league TEXT,
+    home_ground TEXT
+);
+
+INSERT INTO dim_teams 
+SELECT * FROM temp_teams;
+
+UPDATE dim_teams
+SET dim_teams.number_a_side = temp_age_groups.number_a_side
+FROM temp_age_groups
+WHERE dim_teams.number_a_side = temp_age_groups.id;
+
+
+
+
+-- temp table to check if the suspension is active given there is a game each week
+CREATE OR REPLACE TEMPORARY TABLE temp_new_player_suspensions (
+    id INT,
+    player_id INT,
+    start_date DATE,
+    games_suspended INT
+);
+
+INSERT INTO temp_new_player_suspensions
+SELECT * FROM temp_player_suspensions;
+
+ALTER TABLE temp_new_player_suspensions
+ADD active_suspension BOOLEAN;
+
+UPDATE temp_new_player_suspensions
+SET active_suspension = 
+CASE 
+WHEN start_date + 7*games_suspended >= CURRENT_DATE THEN TRUE
+ELSE FALSE
+END;
+
+
+
+
+--Suspension join table with players with suspensions (active or not) adn joined with their teams 
+CREATE OR REPLACE VIEW ps_with_teams AS
+SELECT team_id, start_date, games_suspended, active_suspension FROM temp_teams
+JOIN temp_players
+ON temp_players.team_id = temp_teams.id
+JOIN temp_new_player_suspensions
+ON temp_new_player_suspensions.player_id = temp_players.id;
+
+
+
+--table with number of active player suspensions per team
+CREATE OR REPLACE VIEW active_ps_with_teams AS
+SELECT team_id, COUNT(team_id) AS suspended_players
+FROM PS_WITH_TEAMS
+WHERE active_suspension = TRUE
+GROUP BY team_id;
+
+
+
+--table with number of player suspensions per team this season (after 11 August 2023)
+CREATE OR REPLACE VIEW ps_this_season_with_teams AS
+SELECT team_id, COUNT(team_id) AS season_total_suspensions
+FROM PS_WITH_TEAMS
+WHERE start_date >= '2023-08-11'
+GROUP BY team_id;
+
+
+-- fact_teams_suspensions
+CREATE OR REPLACE TABLE fact_teams_suspensions (
+    id INT PRIMARY KEY AUTOINCREMENT,
+    team_id INT,
+    suspended_players INT,
+    season_total_suspensions INT,
+    update_date TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+INSERT INTO fact_teams_suspensions ( team_id, suspended_players, season_total_suspensions)
+SELECT 
+    ps_this_season_with_teams.team_id,
+    COALESCE(active_ps_with_teams.suspended_players, 0) AS suspended_players,
+    ps_this_season_with_teams.season_total_suspensions
+FROM 
+    ps_this_season_with_teams
+LEFT JOIN
+    active_ps_with_teams
+ON
+    ps_this_season_with_teams.team_id = active_ps_with_teams.team_id;
+
+
+ALTER TABLE fact_teams_suspensions
+ADD CONSTRAINT t_fk FOREIGN KEY (team_id) REFERENCES dim_teams(id);
+
+
+SELECT * FROM fact_teams_suspensions;
+
+
