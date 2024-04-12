@@ -1,0 +1,247 @@
+USE DATABASE FOOTBALL;
+
+CREATE OR REPLACE FILE FORMAT my_csv_format
+  TYPE = 'CSV'
+  FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+  SKIP_HEADER = 1  -- Skip the first row (header)
+  NULL_IF = ('NULL', 'null')  -- Treat 'NULL' and 'null' as NULL values
+  REPLACE_INVALID_CHARACTERS =TRUE
+  ENCODING = 'UTF-16'
+  FIELD_DELIMITER = ',';  -- Specify the field delimiter (comma)
+
+
+-- temp players
+CREATE OR REPLACE TEMPORARY TABLE temp_players (
+    id INT,
+    name TEXT,
+    date_of_birth DATE,
+    team_id INT
+);
+
+COPY INTO temp_players
+FROM @my_stage/players.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+--temp carers
+CREATE OR REPLACE TEMPORARY TABLE temp_carers (
+    id INT,
+    name TEXT,
+    phone_number TEXT,
+    address_line_1 TEXT,
+    postcode TEXT
+);
+
+
+COPY INTO temp_carers
+FROM @my_stage/carers.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+
+--temp coaches
+CREATE OR REPLACE TEMPORARY TABLE temp_coaches (
+    id INT,
+    name TEXT,
+    date_of_birth DATE,
+    phone_number TEXT
+);
+
+
+COPY INTO temp_coaches
+FROM @my_stage/coaches.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+
+--temp payments
+CREATE OR REPLACE TEMPORARY TABLE temp_payments (
+    id INT,
+    player_id TEXT,
+    payment_date DATE,
+    payment_amount TEXT
+);
+
+
+
+COPY INTO temp_payments
+FROM @my_stage/payments.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+UPDATE temp_payments
+SET payment_amount = 
+CASE WHEN payment_amount = 'ten' THEN '10'
+ELSE TRY_TO_NUMBER(REGEXP_REPLACE(payment_amount::STRING, '[^0-9.]', ''))
+END;
+
+
+
+--temp players_carers
+CREATE OR REPLACE TEMPORARY TABLE temp_players_carers (
+    id INT,
+    player_id INT,
+    carer_id INT
+);
+
+
+COPY INTO temp_players_carers
+FROM @my_stage/players_carers.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+
+--temp coaches_teams
+CREATE OR REPLACE TEMPORARY TABLE temp_coaches_teams (
+    id INT,
+    coach_id INT,
+    team_id INT
+);
+
+
+COPY INTO temp_coaches_teams
+FROM @my_stage/coaches_teams.csv
+FILE_FORMAT = (FORMAT_NAME = my_csv_format)
+ON_ERROR = 'CONTINUE';
+
+
+
+
+
+
+
+
+
+
+--dim.players
+CREATE OR REPLACE TABLE dim_players (
+    id INT PRIMARY KEY,
+    name TEXT,
+    date_of_birth DATE
+);
+
+INSERT INTO dim_players 
+SELECT id, name, date_of_birth FROM temp_players;
+
+
+--dim.carers
+CREATE OR REPLACE TABLE dim_carers (
+    id INT PRIMARY KEY,
+    name TEXT,
+    phone_number TEXT,
+    address_line_1 TEXT,
+    postcode TEXT
+);
+
+INSERT INTO dim_carers
+SELECT * FROM temp_carers;
+
+
+--dim.coaches
+CREATE OR REPLACE TABLE dim_coaches (
+    id INT PRIMARY KEY,
+    name TEXT,
+    phone_number TEXT,
+    date_of_birth TEXT
+);
+
+INSERT INTO dim_coaches
+SELECT * FROM temp_coaches;
+
+
+--missed payments per player counter
+CREATE OR REPLACE TEMPORARY TABLE temp_missed_payments (
+    player_id INT,
+    months_owed INT
+);
+
+INSERT INTO temp_missed_payments
+SELECT player_id, COUNT(player_id) AS months_owed
+FROM temp_payments
+WHERE temp_payments.payment_amount is NULL
+GROUP BY player_id;
+
+ALTER TABLE temp_missed_payments
+ADD total_debt NUMBER;
+
+UPDATE temp_missed_payments
+SET total_debt = months_owed * 10;
+
+
+
+
+
+
+
+-- getting the first carer id (primary carer)
+CREATE OR REPLACE VIEW players_first_carer AS
+SELECT player_id, carer_id
+FROM temp_players_carers
+WHERE (player_id, id) IN (
+    SELECT player_id, MIN(id)
+    FROM temp_players_carers
+    GROUP BY player_id
+);
+
+
+-- getting the first coach id (primary coach) for each team
+CREATE OR REPLACE VIEW teams_first_coach AS
+SELECT coach_id, team_id
+FROM temp_coaches_teams
+WHERE (team_id, id) IN (
+    SELECT team_id, MIN(id)
+    FROM temp_coaches_teams
+    GROUP BY team_id
+);
+
+
+--finding the players coaches
+CREATE OR REPLACE VIEW players_first_coach AS
+SELECT temp_players.id AS player_id , coach_id
+FROM temp_players
+JOIN teams_first_coach
+ON teams_first_coach.team_id = temp_players.team_id;
+
+
+
+
+
+
+--temp_fact_payments
+CREATE OR REPLACE TABLE fact_player_debts (
+    id INT PRIMARY KEY AUTOINCREMENT,
+    player_id INT,
+    months_owed INT,
+    total_debt NUMBER,
+    primary_carer_id INT,
+    primary_coach_id INT,
+    update_date TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+
+INSERT INTO fact_player_debts (player_id, months_owed, total_debt, primary_carer_id, primary_coach_id)
+SELECT temp_missed_payments.player_id, months_owed, total_debt, carer_id AS primary_carer_id, coach_id AS primary_coach_id FROM temp_missed_payments
+JOIN players_first_carer
+ON players_first_carer.player_id = temp_missed_payments.player_id
+JOIN players_first_coach
+ON players_first_coach.player_id = temp_missed_payments.player_id;
+
+
+
+ALTER TABLE fact_player_debts
+ADD CONSTRAINT c_fk FOREIGN KEY (primary_carer_id) REFERENCES dim_carers(id);
+
+ALTER TABLE fact_player_debts
+ADD CONSTRAINT p_fk FOREIGN KEY (player_id) REFERENCES dim_players(id);
+
+ALTER TABLE fact_player_debts
+ADD CONSTRAINT co_fk FOREIGN KEY (primary_coach_id) REFERENCES dim_coaches(id);
+
+
+SELECT * FROM fact_player_debts;
+
+
